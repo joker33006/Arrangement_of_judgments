@@ -1,0 +1,28 @@
+---
+title: "判決書整理"
+output: html_notebook
+---
+
+```{r}
+library(readxl)
+library(writexl)
+library(data.table)
+```
+Step 1. 讀取判決書檔案，並結合成一個表格。
+```{r}
+path <- "E:/python/verdict_download/"
+name <- list.files(paste0(path,"primary_result"))
+data <- NULL
+data <- lapply(name,function(x){
+  as.data.table(read_xlsx(
+    paste0(path,"primary_result/",x)))
+})
+all_data <- rbindlist(data)
+
+fwrite(all_data,paste0(path,"all_data.csv"))
+```
+Step 2. 處理判決書內容
+
+
+
+
