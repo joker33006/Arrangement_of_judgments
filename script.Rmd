@@ -8,8 +8,11 @@ library(readxl)
 library(writexl)
 library(data.table)
 library(stringr)
+library(rvest)#靜態網頁資料處理
+library(ggplot2)
+
 ```
-Step 1. 讀取判決書檔案，並結合成一個表格。
+## Step 1. 讀取判決書檔案，並結合成一個表格。
 ```{r}
 path <- "E:/python/verdict_download/"
 name <- list.files(paste0(path,"primary_result"))
@@ -21,34 +24,284 @@ data <- lapply(name,function(x){
 all_data <- rbindlist(data)
 
 ```
-Step 2. 梳理判決書內容
+## Step 2. 梳理判決書內容
 基本梳理
-
+### 2.1 資料未載完處理
+資料處理到一半，我們發現有部分判決書並未完整下載。由於搜尋系統擋機器人，幸好有把每篇判決書的url同時下載儲存。因此，我們採用靜態網頁讀取的方式來重新下載未完成的判決書。此外，由於xlsx檔案有字數限制，因此必須處理過文字檔後，才能存成xlsx。並處理查找結果。
 
 ```{r}
 #去除掉"裁定"
 all_data <- all_data[!grep("裁定",article_code)]
-all_data <- unique(all_data, by = "url")
-all_data[,full_text:=gsub(",","，",full_text)]
+all_data <- all_data[duplicated(url)==FALSE]
+all_data[,full_text:=gsub("\\d,\\d","",full_text)]
 data_deal <- NULL
 data_deal <- all_data
-
 data_deal[,test_text:=full_text]
 data_deal[,test_text:=gsub("\\r","\n",test_text)]#將enter統一為換行符號
 data_deal[,test_text:=gsub("\\n\\d{1,3}\\n\\n","",test_text)]#將行號取代到
-data_deal[,test_text:=gsub("\\n\\n\\n    ","",test_text)]#將換行與四個空格取代掉
-data_deal[,test_text:=gsub("\\n{2,3}","\n",test_text)]#將2-3個換行符號取代成一個
-data_deal[,test_text:=gsub(" {4,}","",test_text)]#取代掉4個以上的空格
+data_deal[,test_text:=gsub("\\n{2,} {4,}","",test_text)]
+#將換行與四個以上的空格取代掉
+data_deal[,test_text:=gsub("\\n{2,}","\n",test_text)]#將2-3個換行符號取代成一個
+data_deal[,yorn:=str_detect(test_text,"書記")]
+#判決書最後必然有書記官的名字，以此作為判決書是否完整之依據
 
+write_xlsx(data_deal[,.(yorn)],paste0(path,"/書記官.xlsx"))
+write_xlsx(data_deal[,1:7],paste0(path,"/basic_table.xlsx"))
+write_xlsx(data_deal[,.(test_text)],paste0(path,"/artic.xlsx"))
+########################################目前處理位置
+```
+### 2.2 重新下載完成之判決
+改使用靜態網頁讀取功能。先篩選出不完整的資料，使用靜態功能讀取網頁，取出文字。做完處理後，再存回原資料格。這次簡單做，不要再激怒網管了。
 
-write_xlsx(data_deal[,.(test_text)],paste0(path,"/total_artical.xlsx"))
-write_xlsx(data_deal[,1:7],paste0(path,"/artical_background.xlsx"))
+```{r}
+data_deal[,key_id:=1:nrow(data_deal)]
+data_p2 <- data_deal[,1:8]
+rm(all_data,data,data_deal)
+st_t <- Sys.time()
+for ( i in 1:nrow(data_p2)){
+  art_url <- data_p2[i,url]
+  page.source <- read_html(paste0(art_url,".html"))
+  node <- html_nodes(page.source, xpath = '//*[@id="jud"]/div[4]')
+  data_p2[i,org_text:=html_text(node)]
+  ed_t <- Sys.time()
+}
+ed_t <- Sys.time()
+print(ed_t-st_t)
+beepr::beep(2)
+rm(ed_t,st_t)
+```
+#### 2.2.1 處理簡易庭的資料
+因為笨蛋貓的疏失，重新下載了簡易庭判決書，要另外整理以跟整理好的資料作區別
+```{r}
+s_name <- list.files(paste0(path,"primary_result"),pattern = "simp")
+s_data <- lapply(s_name,function(x){
+  as.data.table(read_xlsx(
+    paste0(path,"primary_result/",x)))
+})
+all_s_data <- rbindlist(s_data)
+#刪除裁定
+all_s_data <- all_s_data[!grep("裁定",article_code)]#刪除裁定
+all_s_data <- all_s_data[grep("民事",article_code)]# 保留民事判決
+all_s_data <- all_s_data[duplicated(url)==FALSE]#刪除重複判決書
+all_s_data
+all_s_data[,type:="s"]
+old_data <- data_p2[,1:8]
+old_data[,type:="o"]
+old_data <- rbind(old_data,all_s_data)
+old_data <- old_data[duplicated(url)==FALSE]
+all_s_data <- old_data[type=="s"]
+all_s_data[,type:=NULL]
+rm(old_data)
+all_s_data[,id:=1:nrow(all_s_data)][,id:=paste0("s_",id)]
+```
+#### 2.2.2 靜態爬蟲簡易庭資料
+```{r}
+st_t <- Sys.time()
+for ( i in 1:nrow(all_s_data)){
+  art_url <- all_s_data[i,url]
+  page.source <- read_html(paste0(art_url,".html"))
+  node <- html_nodes(page.source, xpath = '//*[@id="jud"]/div[4]')
+  all_s_data[i,org_text:=html_text(node)]
+  ed_t <- Sys.time()
+}
+ed_t <- Sys.time()
+print(ed_t-st_t)
+beepr::beep(2)
+rm(ed_t,st_t,node,page.source)
+all_s_data[,test_t:=org_text]
 
 ```
 
+```{r}
+
+```
+
+### 2.3 重新處理判決書格式
+重新下載後的判決書形式與原本不同，因此重新處理。
+
+
+
+```{r}
+data_p2 <- data_p2[str_detect(article_code,"民事")]#排除非民事案件
+data_p2[,id:=1:nrow(data_p2)]#建立ID
+org_text <- data_p2#存後備資料
+data_p2[,test_t:=org_text]#建立處理資料檔案
+data_p2 <- rbind(data_p2[,1:10],all_s_data)#合併簡易庭資料與原始資料
+data_p2[,test_t:=gsub("\\r","\n",test_t)]#統一換行符號
+#將最後一排的長空格換成換行符號
+data_p2[,test_t:=gsub(" {15,}","\n",test_t)]
+data_p2[,test_t:=gsub("\\n[0-9]{1,4}\\n","",test_t)]#處理掉行號
+data_p2[,test_t:=gsub("(\\d),(\\d)","\\1\\2",test_t)]#取代掉數字逗點
+########處理過多的換行
+while(str_detect(data_p2[56,test_t],"\\n\\n")==TRUE){
+    data_p2[,test_t:=gsub("\\n\\n","\n",test_t)]#處理掉過多重複的換行符號
+}
+data_p2[,test_t:=gsub("[\u00A0]"," ",test_t)]#取代掉特殊的空格
+str_detect(data_p2[520,test_t],"\\u00A0")
+#切出以主文作為分界的項目
+##找到主文的字詞位置
+data_p2 <- cbind(data_p2,str_locate(data_p2[,test_t],"主\\s{0,}文"))
+##切出主文以下
+data_p2[,maj:=str_sub(test_t,start = end+1,end =str_count(test_t))]
+##切出主文以上
+data_p2[,main_char:=str_sub(test_t, start = 1, end = start-1)]
+```
+
+## 原被告、上訴被上訴人處理
+```{r}
+###########################################################
+##處理原被告特殊案例
+####處理原告部分
+data_p2[,PT:=NULL]
+#處理"原告即反訴"這類文字，以91,493為例
+##情況有"原告 即反訴被告" "原告/n 即反訴被告" "原告 XXXX 即反訴被告"三種型式，本次案例只牽涉到前兩種
+### 先處理"原告 即反訴被告"
+data_p2[id==493,main_char]
+data_p2[,main_char:=sub("原\\s*告\\s*即\\s*反\\s*訴\\s*被\\s*告","\n原告即反訴",main_char)]
+### 處理"被告 即反訴原告"
+data_p2[,main_char:=sub("被\\s*告\\s*即\\s*反\\s*訴\\s*原\\s*告","\n被告即反訴",main_char)]
+### 處理有分段之原告即反訴被告 案id 91，前面已經把有分段的也取代掉，現在處理分段符號
+##################目前處理到這裡!@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+###處理一整陀無分行之格式
+#以訴訟代理人為切分點在前加入分行符號
+
+
+str_detect(data_p2[,main_char],".*訴\\s{0,}訟\\s{0,}代.*")
+data_p2[,main_char:=sub("(訴\\s{0,}訟\\s{0,}代.*)",
+                        "\n\\1",main_char)]#處理原告後接訴訟代理人之案例
+data_p2[,main_char:=sub("(被\\s{0,}告)",
+                        "\n\\1",main_char)]#處理原告後接被告之案例
+data_p2[,main_char:=sub("(\\d號)(原\\s{0,}告)",
+                        "\\1\n\\2",main_char)]#處理特殊情況，如案例ID:490
+data_p2[,main_char:gsub("\\n\\n","\n",main_char)]#將兩個分行合併成一個
+## 處理原告前有空格的資料
+data_p2[,main_char:=sub("(\\n)\\s{1,}(原\\s{0,}告)","\\1\\2",main_char)]
+## 處理一整陀且原告前有空格的資料
+data_p2[,main_char:=sub("(號\\s{1,})(原\\s{0,}告)","\\1\n\\2",main_char)]
+data_p2[,main_char:=sub("(原\\s*告)\\n","\\1",main_char)]
+
+#############################################處理被告
+##########################
+
+data_p2[2,main_char]
+data_p2[,main_char:=sub("(\\n被\\s{0,}\\告.*)(訴\\s*訟\\s*代)","\\1\n\\2",
+                        main_char)]
+data_p2[,main_char:=gsub("(法\\s*定\\s*代\\s*理)","\n\\1",main_char)]
+data_p2[,main_char:=sub("(被\\s*告)\\n","\\1",main_char)]
+while (any(str_detect(data_p2[,main_char],"\\n\\s{0,}\\n"))){
+    data_p2[,main_char:=gsub("\\n\\s{0,}\\n","\n",main_char)]
+}#將兩個分行合併成一個
+
+#處理"被告/n即再審被告"這類文字
+data_p2
+data_p2[468,main_char]
+```
+特殊案例:91 原告即反訴
+## test, check, and save
+```{r}
+data_p2[,PT:=str_sub(main_char,str_locate(main_char,"\\n原\\s{0,}告.*\\n"))]
+data_p2[,DF:=str_sub(main_char,str_locate(main_char,"\\n被\\s{0,}告.*\\n"))]
+write_xlsx(data_p2[,.(id,main_char,PT)],paste0(path,"/check_table.xlsx"))
+
+
+####確認原告是否為公司
+check_t2 <- data_p2[!is.na(PT)]
+check_t2[,PT:=gsub("原\\s*告","",PT)][,PT:=gsub("\\s","",PT)][,PT:=gsub("\\n","",PT)]
+check_t2[,count:=str_count(PT)]
+check_t2[1,PT]
+write_xlsx(check_t2[,.(id,main_char,PT,count)],paste0(path,"/check_table2.xlsx"))
+#########
+
+##### 將特殊的項目(一)取代為正常的(一)
+
+
+####56篇
+str_detect(data_p2[,test_t],"主\\ {0,}文")
+
+data_p2[]
+str_locate(data_p2[,test_text],"")
+
+str_detect(data_p2[56,test_text],"\\u3220")
+sym_t <- fread(paste0(path,"/字符取代.csv"),encoding ="UTF-8")
+for (i in 1:nrow(data_p2)){
+  i = 56
+  if (str_detect(data_p2[i,test_text],"[\u3220]")==TRUE){
+     text <- data_p2[i,test_text]
+       for (j in 1:nrow(sym_t)){
+         text <- gsub(as.character(sym_t[j,1]),paste0("\n  ",sym_t[j,2]),text)
+        }
+  data_p2[i, test_text:=text]
+  } 
+
+}
+
+
+str <- str_locate(data_p2[51, test_text],pattern = "\\u3221")[1]
+test_t <- str_sub(data_p2[51, test_text],start=str,end = str+50)
+str_detect(test_t,"\u3221")
+test_t <- str_replace_all(test_t,c("\\u3220","\\u3221"),
+                          c("\n (一)","\n  (二)"))
+rm(test_t)
+rm(str)
+str_detect(data_p2[,test_text],"本院")
+####11
+data_p2[,test_text:=gsub(",","，",test_text)]#取代掉逗號
+data_p2[,test_text:=gsub("\\n\\n","\n",test_text)]#取代兩個分行符號
+#data_p2[,test_text:=gsub("\\n\\n\\s{4,}([\u4E00-\u9FFF])","\\1",test_text)]
+
+data_p2[,test_text:=gsub("\n\\s{4,}","",test_text)]
+##data_p2[,test_text:=gsub("([\u4E00-\u9FFF])\\n {0,}([\u4E00-\u9FFF])",
+##                         "\\1\\2",test_text)]#執行結果有問題
+data_p2[,test_text:=gsub("([\u4E00-\u9FFF])(一、)","\\1\n\\2",test_text)]
+data_p2[56,test_text]
+```
+
+## 存檔區
+```{r}
+#####存檔
+for (i in 1:nrow(data_p2)){
+  name <- data_p2[i,article_code]
+  id <- as.character(data_p2[i,id])
+  cat(as.character(data_p2[i,.(test_t)]), 
+              file = paste0(path,"/org_text/",id,". ",name,".txt"))
+}
+write_xlsx(data_p2[,1:8],paste0(path,"/basic_table.xlsx"))
+#處理英文字員與數字
+
+
+
+```
+需要處理
+```{r}
+fread()
+
+[\u2000-\u206F]
+```
+簡單作圖
+
+```{r}
+
+```
+
+
 Step 2.2 處理特殊格式
 如"臺灣臺中地方法院 107 年度 勞訴 字第 216 號民事判決（54K）"這篇
-並未將分點分項妥善分行。為了後續方便處理，使用
+並未將分點分項妥善分行。為了後續方便處理，先嘗試分行
+```{r}
+data_p2[,year:=as.numeric(gsub("(^\\d{2,3})\\..*","\\1",date))]
+head(data_p2[,year])
+ggplot(data_p2,aes(x=year))+
+  geom_bar(fill = "skyblue3",width = 0.6)+
+  labs(x="Year",Y="Count")
+ggsave(paste0(path,"article_count.jpeg"),height = 5,width = 9,dpi=600)
+art_count <- data_p2[,.(P=.N),by=year]
+art_count[,per:=P/sum(P)*100]
+ggplot(art_count,aes(x=year,y=per))+
+  geom_col(fill = "skyblue3",width = 0.6)+
+  labs(x="Year",Y="Percentage of total article")
+ggsave(paste0(path,"article_count.jpeg"),height = 5,width = 9,dpi=600)
+```
 
 
 
